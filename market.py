@@ -103,25 +103,32 @@ def quarter_start(today):
 # ======== 計算漲跌 ========
 def compute_changes(hist_map):
     rows = []
-    today = date.today()
-
-    targets = {
-        "1日": today - timedelta(days=1),
-        "1週": today - timedelta(days=7),
-        "1月": today - timedelta(days=30),
-        "1年": today - timedelta(days=365),
-        "QTD": quarter_start(today),
-        "YTD": date(today.year, 1, 1)
-    }
 
     for name, tk in ASSETS.items():
         hist = hist_map.get(tk, pd.DataFrame())
-        latest = hist["Close"].iloc[-1] if not hist.empty and "Close" in hist.columns else np.nan
+        has_data = not hist.empty and "Close" in hist.columns
+        closes = hist["Close"].dropna() if has_data else pd.Series(dtype=float)
+        latest = closes.iloc[-1] if len(closes) else np.nan
 
         changes = {}
-        for label, base_date in targets.items():
-            prev = nearest_price(hist, base_date)
-            changes[label] = round((latest / prev - 1) * 100, 2) if pd.notna(latest) and pd.notna(prev) and prev != 0 else np.nan
+        if len(closes):
+            # 以「最後一根K線日期」為錨點，避免週末/休市/時區造成 0%
+            anchor = closes.index[-1].date()
+            targets = {
+                "1週": anchor - timedelta(days=7),
+                "1月": anchor - timedelta(days=30),
+                "1年": anchor - timedelta(days=365),
+                "QTD": quarter_start(anchor),
+                "YTD": date(anchor.year, 1, 1),
+            }
+            # 1日 = 最新收盤 vs 前一根K線收盤
+            prev1 = closes.iloc[-2] if len(closes) >= 2 else np.nan
+            changes["1日"] = round((latest / prev1 - 1) * 100, 2) if pd.notna(prev1) and prev1 != 0 else np.nan
+            for label, base_date in targets.items():
+                prev = nearest_price(hist, base_date)
+                changes[label] = round((latest / prev - 1) * 100, 2) if pd.notna(prev) and prev != 0 else np.nan
+        else:
+            changes = {k: np.nan for k in ["1日", "1週", "1月", "1年", "QTD", "YTD"]}
 
         rows.append({
             "資產": name, "Ticker": tk, "收盤": round(latest, 4) if pd.notna(latest) else np.nan,
