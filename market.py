@@ -4,6 +4,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, date  # 正確寫法
 import os
+import json
+import re
 
 st.set_page_config(page_title="市場熱力圖", layout="wide")
 st.title("每日市場熱力圖（yfinance 版）")
@@ -36,6 +38,60 @@ ai_focus = st.sidebar.text_input("重點關注標的（逗號分隔）", value="
 ai_style = st.sidebar.selectbox("總結風格", ["決策型（明確多空方向）", "簡報型（精簡重點）", "深度研究型"])
 anthropic_key = st.sidebar.text_input("Anthropic API Key（選填，直接生成）", type="password")
 anthropic_model = st.sidebar.text_input("模型", value="claude-sonnet-5-5")
+
+
+# ======== 自選股票 ========
+WATCHLIST_FILE = "watchlist.json"
+
+def load_watchlist():
+    try:
+        with open(WATCHLIST_FILE, encoding="utf-8") as f:
+            return json.load(f).get("text", "")
+    except Exception:
+        return ""
+
+def save_watchlist(text):
+    try:
+        with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
+            json.dump({"text": text}, f, ensure_ascii=False)
+    except Exception as e:
+        st.sidebar.warning(f"自選清單儲存失敗：{e}")
+
+def parse_custom(text):
+    """支援：AMD, PLTR  /  特斯拉:TSLA  /  騰訊:0700.HK  /  BTC-USD  /  GC=F（換行或逗號分隔）"""
+    items = {}
+    for part in re.split(r"[,\n，;；\s]+", text.strip()):
+        if not part:
+            continue
+        if ":" in part:
+            nm, tk = part.split(":", 1)
+        else:
+            nm, tk = "", part
+        tk = tk.strip().upper()
+        if not tk:
+            continue
+        items[(nm.strip() or tk)] = tk
+    return items
+
+st.sidebar.header("自選股票")
+custom_text = st.sidebar.text_area(
+    "輸入代號（逗號或換行分隔，可用「名稱:代號」）",
+    value=load_watchlist(), height=100,
+    placeholder="AMD, PLTR, 騰訊:0700.HK, BTC-USD"
+)
+remember_watchlist = st.sidebar.checkbox("記住自選清單", value=True)
+hidden_defaults = st.sidebar.multiselect("隱藏預設資產", list(ASSETS.keys()))
+
+ACTIVE_ASSETS = {k: v for k, v in ASSETS.items() if k not in hidden_defaults}
+_seen = set(ACTIVE_ASSETS.values())
+for _nm, _tk in parse_custom(custom_text).items():
+    if _tk in _seen:
+        continue
+    if _nm in ACTIVE_ASSETS:
+        _nm = f"{_nm}({_tk})"
+    ACTIVE_ASSETS[_nm] = _tk
+    _seen.add(_tk)
+st.sidebar.caption(f"目前共 {len(ACTIVE_ASSETS)} 檔（自選 {len(ACTIVE_ASSETS) - len([k for k in ASSETS if k not in hidden_defaults])} 檔）")
 
 # ======== 時區工具 ========
 NY_TZ = 'America/New_York'
@@ -101,10 +157,10 @@ def quarter_start(today):
     return date(today.year, 3*(q-1)+1, 1)
 
 # ======== 計算漲跌 ========
-def compute_changes(hist_map):
+def compute_changes(hist_map, assets):
     rows = []
 
-    for name, tk in ASSETS.items():
+    for name, tk in assets.items():
         hist = hist_map.get(tk, pd.DataFrame())
         has_data = not hist.empty and "Close" in hist.columns
         closes = hist["Close"].dropna() if has_data else pd.Series(dtype=float)
@@ -282,12 +338,15 @@ def colorize(val):
 # ======== 主程式 ========
 if st.button("生成市場熱力圖", type="primary"):
     with st.spinner("抓取資料中..."):
-        hist_map = fetch_history(list(ASSETS.values()), start_of_fetch)
-        df_new = compute_changes(hist_map)
+        hist_map = fetch_history(list(ACTIVE_ASSETS.values()), start_of_fetch)
+        df_new = compute_changes(hist_map, ACTIVE_ASSETS)
+    if remember_watchlist:
+        save_watchlist(custom_text)
+    missing = df_new[df_new["收盤"].isna()]["Ticker"].tolist()
     csv_file = f"market_heatmap_{date.today().isoformat()}.csv"
     csv_path = os.path.join(save_folder, csv_file)
     df_new.to_csv(csv_path, encoding="utf-8-sig", float_format="%.4f")
-    st.session_state.update(df=df_new, csv_file=csv_file, csv_path=csv_path, ai_report=None)
+    st.session_state.update(df=df_new, csv_file=csv_file, csv_path=csv_path, ai_report=None, missing=missing)
 
 if "df" in st.session_state:
     df = st.session_state["df"]
@@ -297,6 +356,8 @@ if "df" in st.session_state:
         .format({"收盤": "{:.4f}", **{col: "{:.2f}%" for col in style_cols}}, na_rep="N/A")\
         .set_properties(**{'text-align': 'center'}, subset=style_cols)
 
+    if st.session_state.get("missing"):
+        st.warning("以下代號找不到資料，請確認拼寫（港股 0700.HK、加密 BTC-USD、期貨 GC=F）：" + "、".join(st.session_state["missing"]))
     st.subheader(f"市場表現 {date.today()}")
     st.dataframe(styled, use_container_width=True)
     st.success(f"已儲存：`{st.session_state['csv_path']}`")
